@@ -106,7 +106,11 @@ build.bat
 - **FluxDown 下载器** — 多线程下载器（`dist\tools\FluxDown\`）
 - **Visual Studio Code** — 代码编辑器（`dist\tools\VSCode\`）
 - **Dev-C++ 编译器** — 经典 C/C++ IDE，内置 MinGW64（`dist\tools\DevCpp\`）
-- **OpenCode 便携版** — AI 编程终端，配置 / skills / 会话数据全在包内（`dist\tools\OpenCode\`）
+- **OpenCode 便携版** — AI 编程终端 v2.2.7，配置 / skills / 会话数据全在包内（`dist\tools\OpenCode\`）
+
+> OpenCode 便携版的后台服务固定用 `127.0.0.1:4010`，避开系统里 npm 版占用的 28894。
+> 端口保存在 `dist\tools\OpenCode\.config\opencode\service.json`；该文件丢失时，`start-opencode.bat` 会在启动前自动重建为 4010。
+> 升级方式：下载新的 `opencode-windows-x64.zip`，用其中的 `opencode.exe` 覆盖同名文件，其余文件保留。
 
 > 需要什么工具告诉我，我会把程序放进 `dist\tools\` 并在 `tools.ini` 里加好。
 
