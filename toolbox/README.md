@@ -32,7 +32,8 @@ toolbox/
 │     ├─ DirectXRepair/ DirectX 修复工具
 │     ├─ FluxDown/      FluxDown 下载器
 │     ├─ VSCode/        Visual Studio Code
-│     └─ DevCpp/        Dev-C++
+│     ├─ DevCpp/        Dev-C++
+│     └─ OpenCode/      OpenCode 便携版
 └─ build.bat            编译脚本
 ```
 
@@ -105,6 +106,7 @@ build.bat
 - **FluxDown 下载器** — 多线程下载器（`dist\tools\FluxDown\`）
 - **Visual Studio Code** — 代码编辑器（`dist\tools\VSCode\`）
 - **Dev-C++ 编译器** — 经典 C/C++ IDE，内置 MinGW64（`dist\tools\DevCpp\`）
+- **OpenCode 便携版** — AI 编程终端，配置 / skills / 会话数据全在包内（`dist\tools\OpenCode\`）
 
 > 需要什么工具告诉我，我会把程序放进 `dist\tools\` 并在 `tools.ini` 里加好。
 
