@@ -1,0 +1,9 @@
+# 编译中间文件
+build/
+
+# 成品目录里的可执行文件与工具本体（体积太大，不进仓库）
+dist/*
+!dist/tools.ini
+
+# 运行时生成的设置文件
+dist/settings.ini
