@@ -3,6 +3,8 @@
 #include "theme.h"
 #include "ui.h"
 
+#include <string.h>
+
 // Win API 显式声明:MinGW 4.9 里 GetKeyboardState 返回 BOOL 而非 const BYTE*,
 // 导致无法直接调 ToUnicodeW。这里动态加载,绕开类型问题。
 static int (*g_pToUnicodeW)(UINT, UINT, const BYTE*, LPWSTR, int, UINT) = 0;
@@ -100,6 +102,77 @@ static void SaveThemePreference(int index)
     WritePrivateProfileStringW(L"ui", L"theme", ThemeId(index), path.c_str());
 }
 
+static std::wstring StatsPath()
+{
+    return GetExeDir() + L"\\stats.ini";
+}
+
+static std::wstring FormatLastUsed(ULONGLONG last)
+{
+    if (last == 0)
+    {
+        return std::wstring();
+    }
+
+    ULARGE_INTEGER li;
+    li.QuadPart = last;
+    FILETIME ft;
+    ft.dwLowDateTime = li.LowPart;
+    ft.dwHighDateTime = li.HighPart;
+
+    FILETIME local;
+    if (!FileTimeToLocalFileTime(&ft, &local))
+    {
+        return std::wstring();
+    }
+    SYSTEMTIME st;
+    if (!FileTimeToSystemTime(&local, &st))
+    {
+        return std::wstring();
+    }
+
+    wchar_t buf[64];
+    swprintf_s(buf, 64, L"%04d-%02d-%02d %02d:%02d",
+               st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+    return buf;
+}
+
+static bool SetClipboardText(const std::wstring& text)
+{
+    if (!OpenClipboard(NULL))
+    {
+        return false;
+    }
+    EmptyClipboard();
+
+    size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!mem)
+    {
+        CloseClipboard();
+        return false;
+    }
+
+    void* dst = GlobalLock(mem);
+    if (!dst)
+    {
+        GlobalFree(mem);
+        CloseClipboard();
+        return false;
+    }
+    memcpy(dst, text.c_str(), bytes);
+    GlobalUnlock(mem);
+
+    if (!SetClipboardData(CF_UNICODETEXT, mem))
+    {
+        GlobalFree(mem);
+        CloseClipboard();
+        return false;
+    }
+    CloseClipboard();
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // 全局通知
 // ---------------------------------------------------------------------------
@@ -122,9 +195,11 @@ MainWindow::MainWindow()
       m_backW(0), m_backH(0),
       m_titleH(0), m_sidebarW(0), m_searchH(0),
       m_listItemH(0), m_groupH(0), m_contentHeaderH(0),
+      m_showHidden(false), m_menuWidth(0),
       m_scroll(0), m_scrollMax(0), m_selectedGlobal(-1),
       m_hoverRow(-1), m_hoverRegion(0), m_tracking(false),
-      m_searchActive(false), m_tickTimerId(0)
+      m_searchActive(false),
+      m_tickTimerId(0), m_statusTimerId(0)
 {
 }
 
@@ -215,8 +290,11 @@ void MainWindow::Create(HINSTANCE instance)
 
     self->InitLayout();
     ApplyTheme(LoadThemePreference());
+    self->LoadHiddenIds();
+    self->m_stats.Load(StatsPath());
     self->ReloadItems();
     self->m_tickTimerId = SetTimer(hwnd, 1, 60, NULL);
+    self->m_statusTimerId = SetTimer(hwnd, 2, 1500, NULL);
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -255,6 +333,11 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wParam, LPARAM lParam)
         {
             KillTimer(m_hwnd, m_tickTimerId);
             m_tickTimerId = 0;
+        }
+        if (m_statusTimerId)
+        {
+            KillTimer(m_hwnd, m_statusTimerId);
+            m_statusTimerId = 0;
         }
 
         HWND hwnd = m_hwnd;
@@ -369,6 +452,10 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wParam, LPARAM lParam)
                 InvalidateRect(m_hwnd, NULL, FALSE);
             }
         }
+        else if (wParam == 2)
+        {
+            PollRunningState();
+        }
         return 0;
 
     case WM_SETCURSOR:
@@ -432,6 +519,56 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wParam, LPARAM lParam)
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             ScrollListBy(-delta / WHEEL_DELTA * S(56));
         }
+        return 0;
+    }
+
+    case WM_MEASUREITEM:
+    {
+        MEASUREITEMSTRUCT* mis = (MEASUREITEMSTRUCT*)lParam;
+        if (mis && mis->CtlType == ODT_MENU)
+        {
+            bool separator = false;
+            for (size_t i = 0; i < m_menuEntries.size(); ++i)
+            {
+                if (m_menuEntries[i].separator &&
+                    m_menuEntries[i].cmd == (int)mis->itemID)
+                {
+                    separator = true;
+                    break;
+                }
+            }
+            mis->itemWidth = (UINT)(separator ? S(10) : m_menuWidth);
+            mis->itemHeight = (UINT)(separator ? S(9) : S(28));
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_DRAWITEM:
+    {
+        DRAWITEMSTRUCT* dis = (DRAWITEMSTRUCT*)lParam;
+        if (dis && dis->CtlType == ODT_MENU)
+        {
+            DrawMenuEntry(dis);
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_CONTEXTMENU:
+    {
+        int sx = GET_X_LPARAM(lParam);
+        int sy = GET_Y_LPARAM(lParam);
+        if (sx == -1 && sy == -1)
+        {
+            POINT pt;
+            pt.x = m_sidebarW / 2;
+            pt.y = m_titleH + m_searchH + S(60);
+            ClientToScreen(m_hwnd, &pt);
+            sx = pt.x;
+            sy = pt.y;
+        }
+        ShowContextMenu(sx, sy);
         return 0;
     }
 
@@ -602,7 +739,8 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wParam, LPARAM lParam)
             if (vk >= '1' && vk <= '9')
             {
                 int idx = (int)(vk - '1');
-                if (idx < (int)m_items.size())
+                if (idx < (int)m_items.size() &&
+                    (!m_items[idx].hidden || m_showHidden))
                 {
                     SelectGlobal(idx);
                 }
@@ -616,6 +754,12 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wParam, LPARAM lParam)
             if (vk == 'T' || vk == 't')
             {
                 SwitchTheme();
+                return 0;
+            }
+            if (vk == VK_APPS ||
+                ((GetKeyState(VK_SHIFT) & 0x8000) != 0 && vk == VK_F10))
+            {
+                SendMessageW(m_hwnd, WM_CONTEXTMENU, (WPARAM)m_hwnd, (LPARAM)-1);
                 return 0;
             }
         }
@@ -661,6 +805,12 @@ void MainWindow::ReloadItems()
 {
     m_items = LoadLaunchers(GetExeDir());
 
+    for (size_t i = 0; i < m_items.size(); ++i)
+    {
+        m_items[i].hidden = IsHiddenId(m_items[i].id);
+    }
+    UpdateRunningItems(m_items);
+
     if (m_selectedGlobal >= (int)m_items.size())
     {
         m_selectedGlobal = -1;
@@ -694,11 +844,15 @@ void MainWindow::UpdateFilter()
     }
     bool searching = !q.empty();
 
-    std::vector<std::wstring> categories;
+    // 先过滤出可见工具:隐藏项(除非打开「显示隐藏」)和搜索不匹配项都跳过。
+    std::vector<int> visible;
     for (size_t i = 0; i < m_items.size(); ++i)
     {
         const LauncherItem& t = m_items[i];
-        bool match = true;
+        if (t.hidden && !m_showHidden)
+        {
+            continue;
+        }
         if (searching)
         {
             std::wstring hay = t.name + L" " + t.category + L" " + t.desc + L" " + t.path;
@@ -706,16 +860,63 @@ void MainWindow::UpdateFilter()
             {
                 hay[k] = (wchar_t)towlower(hay[k]);
             }
-            match = (hay.find(q) != std::wstring::npos);
+            if (hay.find(q) == std::wstring::npos)
+            {
+                continue;
+            }
         }
-        if (!match)
+        visible.push_back((int)i);
+    }
+
+    // 最近使用:非搜索状态下置顶显示,最多 5 项。
+    if (!searching)
+    {
+        std::vector<std::wstring> recentIds;
+        m_stats.RecentIds(recentIds, 5);
+
+        std::vector<int> recentIdx;
+        for (size_t r = 0; r < recentIds.size(); ++r)
         {
-            continue;
+            for (size_t v = 0; v < visible.size(); ++v)
+            {
+                if (m_items[visible[v]].id == recentIds[r])
+                {
+                    recentIdx.push_back(visible[v]);
+                    break;
+                }
+            }
         }
+
+        if (!recentIdx.empty())
+        {
+            Row g;
+            g.isGroup = true;
+            g.globalIndex = -1;
+            g.label = L"最近使用";
+            g.height = m_groupH;
+            m_rows.push_back(g);
+
+            for (size_t r = 0; r < recentIdx.size(); ++r)
+            {
+                Row row;
+                row.isGroup = false;
+                row.globalIndex = recentIdx[r];
+                row.label = m_items[recentIdx[r]].name;
+                row.height = m_listItemH;
+                m_rows.push_back(row);
+            }
+        }
+    }
+
+    // 分类按工具在 tools.ini 里首次出现的顺序排列。
+    std::vector<std::wstring> categories;
+    for (size_t v = 0; v < visible.size(); ++v)
+    {
+        const std::wstring& cat = m_items[visible[v]].category;
         bool found = false;
         for (size_t c = 0; c < categories.size(); ++c)
         {
-            if (categories[c] == t.category)
+            if (categories[c] == cat)
             {
                 found = true;
                 break;
@@ -723,7 +924,7 @@ void MainWindow::UpdateFilter()
         }
         if (!found)
         {
-            categories.push_back(t.category);
+            categories.push_back(cat);
         }
     }
 
@@ -736,28 +937,16 @@ void MainWindow::UpdateFilter()
         g.height = m_groupH;
         m_rows.push_back(g);
 
-        for (size_t i = 0; i < m_items.size(); ++i)
+        for (size_t v = 0; v < visible.size(); ++v)
         {
-            const LauncherItem& t = m_items[i];
+            const LauncherItem& t = m_items[visible[v]];
             if (t.category != categories[c])
             {
                 continue;
             }
-            if (searching)
-            {
-                std::wstring hay = t.name + L" " + t.category + L" " + t.desc + L" " + t.path;
-                for (size_t k = 0; k < hay.size(); ++k)
-                {
-                    hay[k] = (wchar_t)towlower(hay[k]);
-                }
-                if (hay.find(q) == std::wstring::npos)
-                {
-                    continue;
-                }
-            }
             Row r;
             r.isGroup = false;
-            r.globalIndex = (int)i;
+            r.globalIndex = visible[v];
             r.label = t.name;
             r.height = m_listItemH;
             m_rows.push_back(r);
@@ -777,7 +966,7 @@ void MainWindow::UpdateFilter()
     if (m_scroll < 0) m_scroll = 0;
 
     // 选中项被过滤掉时,自动选中第一个可见项
-    bool visible = false;
+    bool visibleSel = false;
     int firstVisible = -1;
     for (size_t i = 0; i < m_rows.size(); ++i)
     {
@@ -786,12 +975,12 @@ void MainWindow::UpdateFilter()
             if (firstVisible < 0) firstVisible = m_rows[i].globalIndex;
             if (m_rows[i].globalIndex == prevSelected)
             {
-                visible = true;
+                visibleSel = true;
                 break;
             }
         }
     }
-    if (!visible)
+    if (!visibleSel)
     {
         m_selectedGlobal = firstVisible;
     }
@@ -845,7 +1034,11 @@ void MainWindow::MoveSelection(int delta)
         if (!m_rows[i].isGroup && m_rows[i].globalIndex == m_selectedGlobal)
         {
             cur = (int)i;
-            break;
+            if (delta >= 0)
+            {
+                break; // 向下:从第一处出现开始
+            }
+            // 向上:记住最后一处出现,跨过「最近使用」里的重复项
         }
     }
     int idx = cur;
@@ -861,7 +1054,8 @@ void MainWindow::MoveSelection(int delta)
         if (idx >= (int)m_rows.size()) idx = 0;
         ++guard;
     } while (guard < (int)m_rows.size() * 2 &&
-             (m_rows[idx].isGroup || m_rows[idx].globalIndex < 0));
+             (m_rows[idx].isGroup || m_rows[idx].globalIndex < 0 ||
+              (cur >= 0 && m_rows[idx].globalIndex == m_selectedGlobal)));
 
     if (idx >= 0 && idx < (int)m_rows.size() && !m_rows[idx].isGroup)
     {
@@ -888,20 +1082,446 @@ const LauncherItem* MainWindow::SelectedItem() const
 
 void MainWindow::LaunchSelected()
 {
-    const LauncherItem* item = SelectedItem();
-    if (!item)
+    LaunchItem(m_selectedGlobal, false, false);
+}
+
+void MainWindow::LaunchItem(int index, bool elevated, bool forceNew)
+{
+    if (index < 0 || index >= (int)m_items.size())
     {
         return;
     }
-    std::wstring err;
-    if (LaunchLauncher(*item, err))
+
+    LauncherItem& item = m_items[index];
+
+    // 已经在运行:切到已有窗口,避免重复启动(OpenCode 会抢 4010 端口)。
+    if (!forceNew && !elevated && item.running)
     {
-        ShowNotice(L"已启动：" + item->name, true);
+        std::wstring err;
+        if (FocusRunningInstance(item.runningPid, err))
+        {
+            ShowNotice(L"已切换到运行中的窗口：" + item.name, true);
+        }
+        else
+        {
+            ShowNotice(L"已在运行：" + item.name + L"（" + err + L"）", true);
+        }
+        InvalidateRect(m_hwnd, NULL, FALSE);
+        return;
+    }
+
+    std::wstring err;
+    bool ok = elevated ? LaunchLauncherElevated(item, err)
+                       : LaunchLauncher(item, err);
+    if (ok)
+    {
+        m_stats.Record(item.id);
+        m_stats.Save();
+        UpdateRunningItems(m_items);
+        // 让「最近使用」分组立即出现
+        UpdateFilter();
+        SelectGlobal(index);
+        ShowNotice(elevated ? L"已以管理员身份启动：" + item.name
+                            : L"已启动：" + item.name, true);
     }
     else
     {
         ShowNotice(err, false);
     }
+    InvalidateRect(m_hwnd, NULL, FALSE);
+}
+
+void MainWindow::PollRunningState()
+{
+    std::vector<char> before(m_items.size(), 0);
+    for (size_t i = 0; i < m_items.size(); ++i)
+    {
+        before[i] = m_items[i].running ? 1 : 0;
+    }
+
+    UpdateRunningItems(m_items);
+
+    bool changed = false;
+    for (size_t i = 0; i < m_items.size(); ++i)
+    {
+        char now = m_items[i].running ? 1 : 0;
+        if (now != before[i])
+        {
+            changed = true;
+            break;
+        }
+    }
+    if (changed)
+    {
+        InvalidateRect(m_hwnd, NULL, FALSE);
+    }
+}
+
+bool MainWindow::IsHiddenId(const std::wstring& id) const
+{
+    for (size_t i = 0; i < m_hiddenIds.size(); ++i)
+    {
+        if (m_hiddenIds[i] == id)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void MainWindow::LoadHiddenIds()
+{
+    m_hiddenIds.clear();
+
+    std::wstring path = SettingsPath();
+    wchar_t buf[4096];
+    ZeroMemory(buf, sizeof(buf));
+    GetPrivateProfileStringW(L"ui", L"hidden", L"", buf, 4096, path.c_str());
+
+    std::wstring all(buf);
+    size_t start = 0;
+    while (start <= all.size())
+    {
+        size_t comma = all.find(L',', start);
+        std::wstring part = (comma == std::wstring::npos)
+                                ? all.substr(start)
+                                : all.substr(start, comma - start);
+
+        size_t a = 0;
+        size_t b = part.size();
+        while (a < b && iswspace(part[a])) ++a;
+        while (b > a && iswspace(part[b - 1])) --b;
+        part = part.substr(a, b - a);
+        if (!part.empty())
+        {
+            m_hiddenIds.push_back(part);
+        }
+
+        if (comma == std::wstring::npos)
+        {
+            break;
+        }
+        start = comma + 1;
+    }
+}
+
+void MainWindow::SaveHiddenIds()
+{
+    std::wstring joined;
+    for (size_t i = 0; i < m_hiddenIds.size(); ++i)
+    {
+        if (i > 0)
+        {
+            joined += L",";
+        }
+        joined += m_hiddenIds[i];
+    }
+
+    std::wstring path = SettingsPath();
+    if (joined.empty())
+    {
+        WritePrivateProfileStringW(L"ui", L"hidden", NULL, path.c_str());
+    }
+    else
+    {
+        WritePrivateProfileStringW(L"ui", L"hidden", joined.c_str(), path.c_str());
+    }
+}
+
+void MainWindow::SetItemHidden(int index, bool hidden)
+{
+    if (index < 0 || index >= (int)m_items.size())
+    {
+        return;
+    }
+
+    LauncherItem& item = m_items[index];
+    item.hidden = hidden;
+
+    if (hidden)
+    {
+        if (!IsHiddenId(item.id))
+        {
+            m_hiddenIds.push_back(item.id);
+        }
+    }
+    else
+    {
+        for (size_t i = 0; i < m_hiddenIds.size(); ++i)
+        {
+            if (m_hiddenIds[i] == item.id)
+            {
+                m_hiddenIds.erase(m_hiddenIds.begin() + i);
+                break;
+            }
+        }
+    }
+
+    SaveHiddenIds();
+    UpdateFilter();
+    ShowNotice(hidden ? L"已隐藏：" + item.name : L"已取消隐藏：" + item.name, true);
+    InvalidateRect(m_hwnd, NULL, FALSE);
+}
+
+void MainWindow::ShowContextMenu(int screenX, int screenY)
+{
+    POINT pt;
+    pt.x = screenX;
+    pt.y = screenY;
+    ScreenToClient(m_hwnd, &pt);
+
+    int itemIndex = -1;
+    if (pt.x < m_sidebarW && pt.y >= m_titleH + m_searchH)
+    {
+        int row = ListItemAt(pt.y);
+        if (row >= 0 && row < (int)m_rows.size() && !m_rows[row].isGroup)
+        {
+            itemIndex = m_rows[row].globalIndex;
+        }
+    }
+    else if (pt.x >= m_sidebarW)
+    {
+        itemIndex = m_selectedGlobal;
+    }
+
+    if (itemIndex >= 0)
+    {
+        m_searchActive = false;
+        SelectGlobal(itemIndex);
+    }
+
+    m_menuEntries.clear();
+    m_menuWidth = S(196);
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu)
+    {
+        return;
+    }
+
+    HBRUSH back = CreateSolidBrush(RGB(g_theme.panelBg.GetR(), g_theme.panelBg.GetG(),
+                                       g_theme.panelBg.GetB()));
+    MENUINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    mi.fMask = MIM_STYLE | MIM_BACKGROUND;
+    mi.dwStyle = MNS_NOCHECK;
+    mi.hbrBack = back;
+    SetMenuInfo(menu, &mi);
+
+    if (itemIndex >= 0)
+    {
+        const LauncherItem& item = m_items[itemIndex];
+
+        AppendMenuText(menu, item.running ? L"切换到窗口" : L"启动", 1001,
+                       !item.error.empty(), false);
+        AppendMenuText(menu, L"以管理员身份运行", 1002,
+                       !item.error.empty() || item.isUrl, false);
+        AppendMenuText(menu, L"再启动一个", 1003, !item.running, false);
+
+        AppendMenuSeparator(menu);
+        AppendMenuText(menu, L"打开所在目录", 1004,
+                       item.isUrl || !item.exists, false);
+        AppendMenuText(menu, L"复制路径", 1005, false, false);
+        AppendMenuText(menu, L"复制名称", 1006, false, false);
+
+        AppendMenuSeparator(menu);
+        AppendMenuText(menu, item.hidden ? L"取消隐藏该条目" : L"隐藏该条目",
+                       1007, false, item.hidden);
+        AppendMenuText(menu, L"刷新列表", 1008, false, false);
+        if (!m_hiddenIds.empty())
+        {
+            AppendMenuText(menu, L"取消隐藏全部", 1009, false, false);
+        }
+    }
+    else
+    {
+        AppendMenuText(menu, L"刷新列表", 1008, false, false);
+        AppendMenuText(menu, L"显示隐藏的条目", 1010, false, m_showHidden);
+        AppendMenuText(menu, L"取消隐藏全部", 1009, m_hiddenIds.empty(), false);
+        AppendMenuSeparator(menu);
+        AppendMenuText(menu, L"切换主题", 1011, false, false);
+    }
+
+    SetForegroundWindow(m_hwnd);
+    int cmd = (int)TrackPopupMenu(menu,
+                                  TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+                                  screenX, screenY, 0, m_hwnd, NULL);
+    DestroyMenu(menu);
+    if (back)
+    {
+        DeleteObject(back);
+    }
+    // TrackPopupMenu 的已知怪癖:不补这条消息,菜单可能关不掉。
+    PostMessageW(m_hwnd, WM_NULL, 0, 0);
+
+    if (cmd != 0)
+    {
+        ExecuteMenuCommand(cmd, itemIndex);
+    }
+}
+
+void MainWindow::AppendMenuText(HMENU menu, const wchar_t* text, int cmd,
+                                bool disabled, bool checked)
+{
+    MenuEntry e;
+    e.text = text;
+    e.cmd = cmd;
+    e.disabled = disabled;
+    e.checked = checked;
+    m_menuEntries.push_back(e);
+
+    UINT flags = MF_OWNERDRAW;
+    if (disabled)
+    {
+        flags |= MF_GRAYED;
+    }
+    AppendMenuW(menu, flags, (UINT_PTR)cmd, NULL);
+}
+
+void MainWindow::AppendMenuSeparator(HMENU menu)
+{
+    MenuEntry e;
+    e.cmd = 0;
+    e.separator = true;
+    m_menuEntries.push_back(e);
+
+    AppendMenuW(menu, MF_OWNERDRAW | MF_GRAYED, 0, NULL);
+}
+
+void MainWindow::DrawMenuEntry(DRAWITEMSTRUCT* dis)
+{
+    const MenuEntry* entry = NULL;
+    for (size_t i = 0; i < m_menuEntries.size(); ++i)
+    {
+        if (m_menuEntries[i].cmd == (int)dis->itemID &&
+            (m_menuEntries[i].separator || !m_menuEntries[i].text.empty()))
+        {
+            entry = &m_menuEntries[i];
+            break;
+        }
+    }
+    if (!entry)
+    {
+        return;
+    }
+
+    Graphics g(dis->hDC);
+    RectF r((REAL)dis->rcItem.left, (REAL)dis->rcItem.top,
+            (REAL)(dis->rcItem.right - dis->rcItem.left),
+            (REAL)(dis->rcItem.bottom - dis->rcItem.top));
+
+    if (entry->separator)
+    {
+        SolidBrush bg(g_theme.panelBg);
+        g.FillRectangle(&bg, r);
+        Pen line(g_theme.stroke, 1.0f);
+        float y = r.Y + r.Height / 2.0f;
+        g.DrawLine(&line, r.X + SF(10), y, r.X + r.Width - SF(10), y);
+        return;
+    }
+
+    bool selected = (dis->itemState & ODS_SELECTED) != 0;
+    FillSq(g, r, selected ? g_theme.selectedBg : g_theme.panelBg);
+    if (selected)
+    {
+        FillSq(g, RectF(r.X, r.Y, SF(2), r.Height), g_theme.accent);
+    }
+    if (entry->checked)
+    {
+        FillSq(g, RectF(r.X + SF(11), r.Y + r.Height / 2.0f - SF(3),
+                        SF(6), SF(6)), g_theme.accent);
+    }
+
+    Color textColor = entry->disabled
+                          ? g_theme.textMuted
+                          : (selected ? g_theme.textPrimary : g_theme.textSecondary);
+    Font f(g_uiFont.c_str(), SF(12), FontStyleRegular, UnitPixel);
+    RectF tr(r.X + SF(28), r.Y, r.Width - SF(38), r.Height);
+    DrawTextLine(g, entry->text, f, tr, textColor, StringAlignmentNear, true);
+}
+
+void MainWindow::ExecuteMenuCommand(int cmd, int itemIndex)
+{
+    bool hasItem = (itemIndex >= 0 && itemIndex < (int)m_items.size());
+
+    if (!hasItem)
+    {
+        switch (cmd)
+        {
+        case 1008:
+            ReloadItems();
+            ShowNotice(L"已重新载入工具列表", true);
+            break;
+        case 1009:
+            m_hiddenIds.clear();
+            for (size_t i = 0; i < m_items.size(); ++i)
+            {
+                m_items[i].hidden = false;
+            }
+            m_showHidden = false;
+            SaveHiddenIds();
+            UpdateFilter();
+            ShowNotice(L"已取消隐藏全部条目", true);
+            break;
+        case 1010:
+            m_showHidden = !m_showHidden;
+            UpdateFilter();
+            ShowNotice(m_showHidden ? L"已显示隐藏的条目" : L"已收起隐藏的条目", true);
+            break;
+        case 1011:
+            SwitchTheme();
+            break;
+        }
+        InvalidateRect(m_hwnd, NULL, FALSE);
+        return;
+    }
+
+    LauncherItem& item = m_items[itemIndex];
+    switch (cmd)
+    {
+    case 1001:
+        LaunchItem(itemIndex, false, false);
+        break;
+    case 1002:
+        LaunchItem(itemIndex, true, true);
+        break;
+    case 1003:
+        LaunchItem(itemIndex, false, true);
+        break;
+    case 1004:
+        RevealSelected();
+        break;
+    case 1005:
+        ShowNotice(SetClipboardText(item.resolved) ? L"路径已复制"
+                                                   : L"复制失败（剪贴板被占用）",
+                   true);
+        break;
+    case 1006:
+        ShowNotice(SetClipboardText(item.name) ? L"名称已复制"
+                                               : L"复制失败（剪贴板被占用）",
+                   true);
+        break;
+    case 1007:
+        SetItemHidden(itemIndex, !item.hidden);
+        break;
+    case 1008:
+        ReloadItems();
+        ShowNotice(L"已重新载入工具列表", true);
+        break;
+    case 1009:
+        m_hiddenIds.clear();
+        for (size_t i = 0; i < m_items.size(); ++i)
+        {
+            m_items[i].hidden = false;
+        }
+        m_showHidden = false;
+        SaveHiddenIds();
+        UpdateFilter();
+        ShowNotice(L"已取消隐藏全部条目", true);
+        break;
+    }
+
     InvalidateRect(m_hwnd, NULL, FALSE);
 }
 
@@ -1313,9 +1933,20 @@ void MainWindow::PaintSidebar(Graphics& g)
             Font labelFont(g_uiFont.c_str(), SF(12), FontStyleRegular, UnitPixel);
             RectF nameRect(iconR.X + iconR.Width + SF(12), (REAL)(y + S(2)),
                            r.Width - SF(58), (REAL)(h - S(4)));
-            DrawTextLine(g, t.name, labelFont, nameRect,
-                         selected ? g_theme.textPrimary : g_theme.textSecondary,
+            Color nameColor = selected ? g_theme.textPrimary : g_theme.textSecondary;
+            if (t.hidden)
+            {
+                nameColor = g_theme.textMuted;
+            }
+            DrawTextLine(g, t.name, labelFont, nameRect, nameColor,
                          StringAlignmentNear, true);
+
+            if (t.running)
+            {
+                SolidBrush runDot(g_theme.success);
+                g.FillEllipse(&runDot, r.X + r.Width - SF(32),
+                              r.Y + r.Height / 2.0f - SF(3), SF(6), SF(6));
+            }
 
             int number = m_rows[i].globalIndex + 1;
             if (number <= 9)
@@ -1484,6 +2115,11 @@ void MainWindow::PaintContent(Graphics& g)
                 status = item->error;
                 dotColor = g_theme.danger;
             }
+            else if (item->running)
+            {
+                status = L"运行中";
+                dotColor = g_theme.success;
+            }
             else if (item->isUrl)
             {
                 status = L"网页链接";
@@ -1503,6 +2139,24 @@ void MainWindow::PaintContent(Graphics& g)
             RectF sr(sx, sy - SF(2), tw + SF(2), SF(20));
             DrawTextLine(g, status, sf, sr,
                          item->error.empty() ? g_theme.textSecondary : g_theme.danger,
+                         StringAlignmentNear, false);
+        }
+
+        // 使用统计
+        {
+            ToolStat st = m_stats.Get(item->id);
+            std::wstring last = FormatLastUsed(st.last);
+            std::wstring statText = L"尚未使用过";
+            if (st.count > 0 && !last.empty())
+            {
+                wchar_t buf[64];
+                swprintf_s(buf, 64, L"启动 %d 次", st.count);
+                statText = std::wstring(buf) + L" · 上次 " + last;
+            }
+
+            Font stf(g_uiFont.c_str(), SF(10), FontStyleRegular, UnitPixel);
+            RectF sr(textX, cardY + SF(110), cardW - SF(210), SF(20));
+            DrawTextLine(g, statText, stf, sr, g_theme.textMuted,
                          StringAlignmentNear, false);
         }
     }
@@ -1553,7 +2207,7 @@ void MainWindow::PaintContent(Graphics& g)
 
         Font bf(g_uiFont.c_str(), SF(13), FontStyleBold, UnitPixel);
         RectF bt(lb.X + SF(24), lb.Y, lb.Width - SF(24), lb.Height);
-        DrawTextLine(g, L"启动工具", bf, bt,
+        DrawTextLine(g, item->running ? L"切换到窗口" : L"启动工具", bf, bt,
                      disabled ? g_theme.textMuted : g_theme.onAccent,
                      StringAlignmentCenter, false);
 
@@ -1572,7 +2226,7 @@ void MainWindow::PaintContent(Graphics& g)
         Font kf(g_uiFont.c_str(), SF(10), FontStyleRegular, UnitPixel);
         RectF kr(cardX + SF(32), cardY + cardH - SF(30),
                  cardW - SF(64), SF(20));
-        DrawTextLine(g, L"Enter 启动  ·  ↑↓ 切换  ·  / 搜索  ·  T 主题  ·  F5 刷新",
+        DrawTextLine(g, L"Enter 启动  ·  ↑↓ 切换  ·  / 搜索  ·  T 主题  ·  F5 刷新  ·  右键 菜单",
                      kf, kr, g_theme.textMuted, StringAlignmentNear, false);
     }
 

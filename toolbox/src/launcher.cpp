@@ -2,6 +2,7 @@
 #include "ui.h"
 
 #include <shellapi.h>
+#include <tlhelp32.h>
 #include <cwctype>
 #include <memory>
 
@@ -113,6 +114,7 @@ std::shared_ptr<Gdiplus::Bitmap> LoadFileIcon(const std::wstring& file)
 void FinalizeItem(LauncherItem& cur, const std::wstring& sectionName,
                   const std::wstring& exeDir)
 {
+    cur.id = sectionName;
     if (cur.category.empty()) cur.category = L"其他";
     if (cur.name.empty()) cur.name = sectionName;
     if (cur.icon.empty() && !cur.name.empty()) cur.icon = cur.name.substr(0, 1);
@@ -158,6 +160,205 @@ void FinalizeItem(LauncherItem& cur, const std::wstring& sectionName,
     {
         cur.exists = true;
     }
+}
+
+bool ShellExecuteItem(const LauncherItem& item, const wchar_t* verb, std::wstring& err)
+{
+    err.clear();
+    if (!item.error.empty())
+    {
+        err = item.error + L"：" + item.resolved;
+        return false;
+    }
+
+    std::wstring workDir;
+    if (!item.isUrl)
+    {
+        workDir = DirName(item.resolved);
+    }
+
+    HINSTANCE r = ShellExecuteW(NULL, verb, item.resolved.c_str(),
+                                item.args.empty() ? NULL : item.args.c_str(),
+                                workDir.empty() ? NULL : workDir.c_str(),
+                                SW_SHOWNORMAL);
+    if ((INT_PTR)r <= 32)
+    {
+        DWORD lastError = GetLastError();
+        if (lastError == ERROR_CANCELLED || (INT_PTR)r == SE_ERR_ACCESSDENIED)
+        {
+            err = L"已取消管理员授权";
+            return false;
+        }
+        wchar_t buf[64];
+        swprintf_s(buf, 64, L"启动失败 (错误码 %d)", (int)(INT_PTR)r);
+        err = buf;
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// 运行中检测
+// ---------------------------------------------------------------------------
+
+struct ProcEntry
+{
+    DWORD pid;
+    std::wstring path;
+};
+
+typedef BOOL (WINAPI *QueryFullProcessImageNameWFn)(HANDLE, DWORD, LPWSTR, PDWORD);
+
+// MinGW 4.9 的头文件里不一定声明 QueryFullProcessImageNameW,动态取。
+QueryFullProcessImageNameWFn GetQueryFullProcessImageNameW()
+{
+    static QueryFullProcessImageNameWFn fn = NULL;
+    static bool tried = false;
+    if (!tried)
+    {
+        tried = true;
+        HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+        if (k32)
+        {
+            fn = (QueryFullProcessImageNameWFn)GetProcAddress(k32, "QueryFullProcessImageNameW");
+        }
+    }
+    return fn;
+}
+
+bool GetProcessPath(DWORD pid, std::wstring& out)
+{
+    out.clear();
+#if defined(PROCESS_QUERY_LIMITED_INFORMATION)
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+#else
+    HANDLE h = NULL;
+#endif
+    if (!h)
+    {
+        h = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+    }
+    if (!h)
+    {
+        return false;
+    }
+
+    QueryFullProcessImageNameWFn fn = GetQueryFullProcessImageNameW();
+    if (fn)
+    {
+        wchar_t buf[MAX_PATH * 2];
+        DWORD n = MAX_PATH * 2;
+        if (fn(h, 0, buf, &n) && n > 0)
+        {
+            out.assign(buf, n);
+        }
+    }
+    CloseHandle(h);
+    return !out.empty();
+}
+
+void SnapshotProcesses(std::vector<ProcEntry>& list)
+{
+    list.clear();
+
+    DWORD self = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+
+    PROCESSENTRY32W pe;
+    ZeroMemory(&pe, sizeof(pe));
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe))
+    {
+        do
+        {
+            if (pe.th32ProcessID == 0 || pe.th32ProcessID == self)
+            {
+                continue;
+            }
+            ProcEntry e;
+            e.pid = pe.th32ProcessID;
+            if (GetProcessPath(e.pid, e.path))
+            {
+                list.push_back(e);
+            }
+        }
+        while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+}
+
+std::wstring FileExtLower(const std::wstring& file)
+{
+    size_t dot = file.find_last_of(L'.');
+    size_t slash = file.find_last_of(L"\\/");
+    if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash))
+    {
+        return std::wstring();
+    }
+    return LowerW(file.substr(dot));
+}
+
+// 判断某个进程是否是条目的运行实例。
+// exe 走精确路径比较;.bat / .cmd 的脚本宿主不在工具目录,
+// 改用「进程路径位于工具目录下」判定(如 OpenCode 的 opencode.exe)。
+bool PathMatchesItem(const LauncherItem& item, const std::wstring& procPath)
+{
+    if (item.isUrl || item.resolved.empty() || procPath.empty())
+    {
+        return false;
+    }
+
+    std::wstring ext = FileExtLower(item.resolved);
+    if (ext == L".bat" || ext == L".cmd")
+    {
+        std::wstring dir = DirName(item.resolved);
+        if (dir.empty())
+        {
+            return false;
+        }
+        dir += L"\\";
+        return procPath.size() > dir.size() &&
+               _wcsnicmp(procPath.c_str(), dir.c_str(), dir.size()) == 0;
+    }
+
+    return _wcsicmp(procPath.c_str(), item.resolved.c_str()) == 0;
+}
+
+struct FindWindowCtx
+{
+    DWORD pid;
+    HWND hwnd;
+};
+
+BOOL CALLBACK FindMainWindowProc(HWND hwnd, LPARAM lParam)
+{
+    FindWindowCtx* ctx = (FindWindowCtx*)lParam;
+    if (!IsWindowVisible(hwnd))
+    {
+        return TRUE;
+    }
+    if (GetWindow(hwnd, GW_OWNER) != NULL)
+    {
+        return TRUE;
+    }
+    LONG ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    if (ex & WS_EX_TOOLWINDOW)
+    {
+        return TRUE;
+    }
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == ctx->pid)
+    {
+        ctx->hwnd = hwnd;
+        return FALSE;
+    }
+    return TRUE;
 }
 
 } // namespace
@@ -295,30 +496,89 @@ std::vector<LauncherItem> LoadLaunchers(const std::wstring& exeDir)
 
 bool LaunchLauncher(const LauncherItem& item, std::wstring& err)
 {
+    return ShellExecuteItem(item, L"open", err);
+}
+
+bool LaunchLauncherElevated(const LauncherItem& item, std::wstring& err)
+{
+    if (item.isUrl)
+    {
+        err = L"网页链接不需要管理员权限";
+        return false;
+    }
+    return ShellExecuteItem(item, L"runas", err);
+}
+
+void UpdateRunningItems(std::vector<LauncherItem>& items)
+{
+    std::vector<ProcEntry> procs;
+    SnapshotProcesses(procs);
+
+    for (size_t i = 0; i < items.size(); ++i)
+    {
+        LauncherItem& item = items[i];
+        item.running = false;
+        item.runningPid = 0;
+
+        if (item.isUrl || !item.error.empty() || !item.exists)
+        {
+            continue;
+        }
+
+        for (size_t p = 0; p < procs.size(); ++p)
+        {
+            if (PathMatchesItem(item, procs[p].path))
+            {
+                item.running = true;
+                item.runningPid = procs[p].pid;
+                break;
+            }
+        }
+    }
+}
+
+bool FocusRunningInstance(DWORD pid, std::wstring& err)
+{
     err.clear();
-    if (!item.error.empty())
+    if (pid == 0)
     {
-        err = item.error + L"：" + item.resolved;
+        err = L"没有找到运行中的进程";
         return false;
     }
 
-    std::wstring workDir;
-    if (!item.isUrl)
+    FindWindowCtx ctx;
+    ctx.pid = pid;
+    ctx.hwnd = NULL;
+    EnumWindows(FindMainWindowProc, (LPARAM)&ctx);
+
+    if (!ctx.hwnd)
     {
-        workDir = DirName(item.resolved);
+        // 控制台程序的窗口属于 conhost,不在目标进程名下。
+        // 附加上去问一下,Windows Terminal 下可能拿到隐藏窗口。
+        FreeConsole();
+        if (AttachConsole(pid))
+        {
+            HWND con = GetConsoleWindow();
+            FreeConsole();
+            if (con && IsWindowVisible(con))
+            {
+                ctx.hwnd = con;
+            }
+        }
     }
 
-    HINSTANCE r = ShellExecuteW(NULL, L"open", item.resolved.c_str(),
-                                item.args.empty() ? NULL : item.args.c_str(),
-                                workDir.empty() ? NULL : workDir.c_str(),
-                                SW_SHOWNORMAL);
-    if ((INT_PTR)r <= 32)
+    if (!ctx.hwnd)
     {
-        wchar_t buf[64];
-        swprintf_s(buf, 64, L"启动失败 (错误码 %d)", (int)(INT_PTR)r);
-        err = buf;
+        err = L"程序已在运行，但没有找到可切换的窗口";
         return false;
     }
+
+    if (IsIconic(ctx.hwnd))
+    {
+        ShowWindow(ctx.hwnd, SW_RESTORE);
+    }
+    BringWindowToTop(ctx.hwnd);
+    SetForegroundWindow(ctx.hwnd);
     return true;
 }
 

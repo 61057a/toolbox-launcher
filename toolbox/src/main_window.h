@@ -1,6 +1,7 @@
 #pragma once
 #include "common.h"
 #include "launcher.h"
+#include "stats.h"
 
 // 主窗口:左侧搜索 + 分组工具列表,右侧工具详情 / 启动区。
 // 整个窗口只有一个 HWND,全部 GDI+ 自绘。
@@ -39,9 +40,23 @@ private:
     void SelectGlobal(int index);
     void MoveSelection(int delta);
     void LaunchSelected();
+    void LaunchItem(int index, bool elevated, bool forceNew);
     void RevealSelected();
     void SwitchTheme();
     void FocusSearch();
+
+    // 右键菜单 / 隐藏 / 运行状态
+    void ShowContextMenu(int screenX, int screenY);
+    void ExecuteMenuCommand(int cmd, int itemIndex);
+    void AppendMenuText(HMENU menu, const wchar_t* text, int cmd,
+                        bool disabled, bool checked);
+    void AppendMenuSeparator(HMENU menu);
+    void DrawMenuEntry(DRAWITEMSTRUCT* dis);
+    void PollRunningState();
+    void LoadHiddenIds();
+    void SaveHiddenIds();
+    void SetItemHidden(int index, bool hidden);
+    bool IsHiddenId(const std::wstring& id) const;
 
     const LauncherItem* SelectedItem() const;
 
@@ -65,6 +80,22 @@ private:
 
     // 数据
     std::vector<LauncherItem> m_items;
+    StatsStore m_stats;
+    std::vector<std::wstring> m_hiddenIds;
+    bool m_showHidden;
+
+    // 自绘右键菜单
+    struct MenuEntry {
+        std::wstring text;
+        int cmd;
+        bool disabled;
+        bool checked;
+        bool separator;
+
+        MenuEntry() : cmd(0), disabled(false), checked(false), separator(false) {}
+    };
+    std::vector<MenuEntry> m_menuEntries;
+    int m_menuWidth;
 
     // 列表(已按搜索过滤)
     struct Row {
@@ -85,6 +116,7 @@ private:
     std::wstring m_search;
     bool m_searchActive;
 
-    // 计时器(用于通知淡出 / 搜索光标闪烁)
+    // 计时器(用于通知淡出 / 搜索光标闪烁 / 运行状态轮询)
     UINT m_tickTimerId;
+    UINT m_statusTimerId;
 };
