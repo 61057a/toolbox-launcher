@@ -26,6 +26,7 @@ toolbox/
 │  ├─ stats.ini         使用统计（启动次数 / 最后启动时间，程序自动生成）
 │  └─ tools/
 │     ├─ Everything/    Everything 文件搜索
+│     ├─ 7-Zip/         7-Zip 压缩工具
 │     ├─ WizTree/       WizTree 磁盘空间分析
 │     ├─ DiskGenius/    DiskGenius 分区工具
 │     ├─ MyDiskTest/    MyDiskTest 扩容检测
