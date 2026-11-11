@@ -118,3 +118,16 @@ build.bat
 
 启动器会自动从 `path` 指向的 exe / lnk / 文件夹中提取真实系统图标（优先 64px 内嵌图标），
 在左侧列表和右侧详情页中显示。没有可用图标时，回退到 `icon` 字段里的单字图标。
+
+如果 `path` 指向 `.bat` / `.cmd` 这类没有内嵌图标的脚本，可以额外写一行 `iconfile` 指定图标来源：
+
+```ini
+[OpenCode]
+path=tools\OpenCode\start-opencode.bat
+iconfile=tools\OpenCode\opencode.exe
+```
+
+`iconfile` 规则与 `path` 相同（相对 `Toolkit.exe` 所在目录或绝对路径），提取失败时仍会退回 `path` 的图标。
+
+程序自身的图标内嵌在 `Toolkit.exe` 里，来源是 `src\app.ico`（16–256 共 9 个尺寸），
+由 `src\app.rc` 编译进资源（`build.bat` 里用 `windres` 处理），窗口类同时设置了 `hIcon` / `hIconSm`。

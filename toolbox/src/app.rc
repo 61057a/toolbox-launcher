@@ -1,0 +1,5 @@
+#include <windows.h>
+#include "resource.h"
+
+// 程序图标:16/20/24/32/40/48/64/128/256 多尺寸,见 app.ico
+IDI_APPICON ICON "app.ico"

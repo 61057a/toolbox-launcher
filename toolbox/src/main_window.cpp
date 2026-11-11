@@ -1,4 +1,5 @@
 #include "main_window.h"
+#include "resource.h"
 #include "theme.h"
 #include "ui.h"
 
@@ -159,7 +160,12 @@ void MainWindow::Create(HINSTANCE instance)
     wc.lpfnWndProc = MainWindow::WndProc;
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-    wc.hIcon = LoadIconW(instance, (LPCWSTR)MAKEINTRESOURCEW(32512));
+    wc.hIcon = (HICON)LoadImageW(instance, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                 GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON),
+                                 LR_DEFAULTCOLOR);
+    wc.hIconSm = (HICON)LoadImageW(instance, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                   GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+                                   LR_DEFAULTCOLOR);
     wc.lpszClassName = APP_CLASS;
     RegisterClassExW(&wc);
 
@@ -1587,7 +1593,7 @@ void MainWindow::PaintContent(Graphics& g)
         Font sf(g_uiFont.c_str(), SF(10), FontStyleRegular, UnitPixel);
         const wchar_t* lines[3] = {
             L"1. 把工具程序放到 dist\\tools\\<名称>\\ 目录下",
-            L"2. 在 tools.ini 中新增一节，填写 name / category / icon / desc / path",
+            L"2. 在 tools.ini 中新增一节，填写 name / category / iconfile / icon / desc / path",
             L"3. 按 F5 或点击标题栏刷新按钮重新载入"
         };
         for (int i = 0; i < 3; ++i)

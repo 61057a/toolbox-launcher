@@ -138,7 +138,20 @@ void FinalizeItem(LauncherItem& cur, const std::wstring& sectionName,
         }
         else
         {
-            cur.iconBitmap = LoadFileIcon(cur.resolved);
+            // 优先用 iconfile 指定的图标源;没配或提取失败时退回 path 本身
+            if (!cur.iconFile.empty())
+            {
+                std::wstring iconPath = ExpandEnv(cur.iconFile);
+                if (PathIsRelativeW(iconPath.c_str()))
+                {
+                    iconPath = JoinPath(exeDir, iconPath);
+                }
+                cur.iconBitmap = LoadFileIcon(iconPath);
+            }
+            if (!cur.iconBitmap)
+            {
+                cur.iconBitmap = LoadFileIcon(cur.resolved);
+            }
         }
     }
     else
@@ -265,6 +278,7 @@ std::vector<LauncherItem> LoadLaunchers(const std::wstring& exeDir)
         if (key == L"name") cur.name = val;
         else if (key == L"category") cur.category = val;
         else if (key == L"icon") cur.icon = val;
+        else if (key == L"iconfile") cur.iconFile = val;
         else if (key == L"desc" || key == L"description") cur.desc = val;
         else if (key == L"path" || key == L"exe") cur.path = val;
         else if (key == L"args" || key == L"arguments") cur.args = val;

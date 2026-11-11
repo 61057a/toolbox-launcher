@@ -13,7 +13,11 @@ set "LIBS=-lgdiplus -luser32 -lcomctl32 -lgdi32 -lole32 -lshlwapi -lshell32 -lwi
 
 set "SRCS=src\main.cpp src\ui.cpp src\launcher.cpp src\theme.cpp src\main_window.cpp"
 
-echo [1/2] Compiling sources...
+echo [1/3] Compiling resources...
+windres -I src -i src\app.rc -o build\app_res.o
+if errorlevel 1 goto :fail
+
+echo [2/3] Compiling sources...
 for %%F in (%SRCS%) do (
     set "OBJ=build\%%~nF.o"
     echo   %%F
@@ -21,9 +25,9 @@ for %%F in (%SRCS%) do (
     if errorlevel 1 goto :fail
 )
 
-echo [2/2] Linking...
+echo [3/3] Linking...
 g++ -o dist\Toolkit.exe ^
-    build\main.o build\ui.o build\launcher.o build\theme.o build\main_window.o ^
+    build\main.o build\ui.o build\launcher.o build\theme.o build\main_window.o build\app_res.o ^
     %LDFLAGS% %LIBS%
 if errorlevel 1 goto :fail
 

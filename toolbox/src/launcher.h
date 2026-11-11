@@ -10,6 +10,7 @@ struct LauncherItem
     std::wstring icon;       // 单字图标(如 "E" / "搜"),没有真实图标时显示
     std::wstring desc;
     std::wstring path;       // tools.ini 里写的原始路径(相对 exe 目录或绝对路径)
+    std::wstring iconFile;   // 可选:图标来源(如 .bat 指向的 exe),相对 exe 目录或绝对路径
     std::wstring args;
     std::wstring resolved;   // 解析后的绝对路径 / URL
     bool isUrl;
