@@ -38,7 +38,8 @@ toolbox/
 │     ├─ FluxDown/      FluxDown 下载器
 │     ├─ VSCode/        Visual Studio Code
 │     ├─ DevCpp/        Dev-C++
-│     └─ OpenCode/      OpenCode 便携版
+│     ├─ OpenCode/      OpenCode 便携版
+│     └─ ProxyPool/     ProxyPool 免费代理池
 └─ build.bat            编译脚本
 ```
 
