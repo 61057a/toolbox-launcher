@@ -2,6 +2,7 @@
 #include "resource.h"
 #include "theme.h"
 #include "ui.h"
+#include "proxy.h"
 
 #include <string.h>
 
@@ -199,7 +200,9 @@ MainWindow::MainWindow()
       m_scroll(0), m_scrollMax(0), m_selectedGlobal(-1),
       m_hoverRow(-1), m_hoverRegion(0), m_tracking(false),
       m_searchActive(false),
-      m_tickTimerId(0), m_statusTimerId(0)
+      m_tickTimerId(0), m_statusTimerId(0),
+      m_proxyOnline(false), m_proxyStarting(false), m_proxyStartUntil(0),
+      m_proxyAuto(true), m_proxyPort(8080)
 {
 }
 
@@ -291,8 +294,10 @@ void MainWindow::Create(HINSTANCE instance)
     self->InitLayout();
     ApplyTheme(LoadThemePreference());
     self->LoadHiddenIds();
+    self->LoadProxySettings();
     self->m_stats.Load(StatsPath());
     self->ReloadItems();
+    self->m_proxyOnline = IsLocalPortOpen(self->m_proxyPort, 400);
     self->m_tickTimerId = SetTimer(hwnd, 1, 60, NULL);
     self->m_statusTimerId = SetTimer(hwnd, 2, 1500, NULL);
 
@@ -431,7 +436,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wParam, LPARAM lParam)
     {
         MINMAXINFO* mmi = (MINMAXINFO*)lParam;
         mmi->ptMinTrackSize.x = S(820);
-        mmi->ptMinTrackSize.y = S(520);
+        mmi->ptMinTrackSize.y = S(560);
         return 0;
     }
 
@@ -455,6 +460,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wParam, LPARAM lParam)
         else if (wParam == 2)
         {
             PollRunningState();
+            PollProxyState();
         }
         return 0;
 
@@ -633,6 +639,21 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wParam, LPARAM lParam)
         if (region == 9)
         {
             SwitchTheme();
+            return 0;
+        }
+        if (region == 10)
+        {
+            StartProxyFromPanel();
+            return 0;
+        }
+        if (region == 11)
+        {
+            StopProxyFromPanel();
+            return 0;
+        }
+        if (region == 12)
+        {
+            ToggleProxyAuto();
             return 0;
         }
         if (region == 4)
@@ -1110,6 +1131,11 @@ void MainWindow::LaunchItem(int index, bool elevated, bool forceNew)
         return;
     }
 
+    if (!elevated)
+    {
+        MaybeStartProxyFor(item);
+    }
+
     std::wstring err;
     bool ok = elevated ? LaunchLauncherElevated(item, err)
                        : LaunchLauncher(item, err);
@@ -1121,14 +1147,158 @@ void MainWindow::LaunchItem(int index, bool elevated, bool forceNew)
         // 让「最近使用」分组立即出现
         UpdateFilter();
         SelectGlobal(index);
-        ShowNotice(elevated ? L"已以管理员身份启动：" + item.name
-                            : L"已启动：" + item.name, true);
+        if (m_proxyStarting)
+        {
+            ShowNotice(L"已启动：" + item.name + L"（正在等代理池就绪）", true);
+        }
+        else
+        {
+            ShowNotice(elevated ? L"已以管理员身份启动：" + item.name
+                                : L"已启动：" + item.name, true);
+        }
     }
     else
     {
         ShowNotice(err, false);
     }
     InvalidateRect(m_hwnd, NULL, FALSE);
+}
+
+static bool IsOpenCodeEntry(const LauncherItem& item)
+{
+    if (item.isUrl || item.resolved.empty())
+    {
+        return false;
+    }
+    std::wstring lower = item.resolved;
+    for (size_t i = 0; i < lower.size(); ++i)
+    {
+        lower[i] = (wchar_t)towlower(lower[i]);
+    }
+    const wchar_t* suffix = L"start-opencode.bat";
+    size_t n = wcslen(suffix);
+    return lower.size() >= n && lower.compare(lower.size() - n, n, suffix) == 0;
+}
+
+void MainWindow::LoadProxySettings()
+{
+    std::wstring path = SettingsPath();
+    m_proxyAuto = GetPrivateProfileIntW(L"proxy", L"auto", 1, path.c_str()) != 0;
+
+    int port = (int)GetPrivateProfileIntW(L"proxy", L"port", 8080, path.c_str());
+    if (port <= 0 || port > 65535)
+    {
+        port = 8080;
+    }
+    m_proxyPort = port;
+}
+
+void MainWindow::SaveProxyAuto()
+{
+    std::wstring path = SettingsPath();
+    WritePrivateProfileStringW(L"proxy", L"auto", m_proxyAuto ? L"1" : L"0", path.c_str());
+}
+
+void MainWindow::PollProxyState()
+{
+    bool online = IsLocalPortOpen(m_proxyPort, 120);
+    bool starting = m_proxyStarting;
+
+    if (online && starting)
+    {
+        starting = false;
+        ShowNotice(L"代理池已就绪：127.0.0.1:8080", true);
+    }
+    else if (starting && GetTickCount64() > m_proxyStartUntil)
+    {
+        starting = false;
+        ShowNotice(L"代理池启动超时，看看它自己的窗口有没有报错", false);
+    }
+
+    if (online != m_proxyOnline || starting != m_proxyStarting)
+    {
+        m_proxyOnline = online;
+        m_proxyStarting = starting;
+        InvalidateRect(m_hwnd, NULL, FALSE);
+    }
+}
+
+void MainWindow::StartProxyFromPanel()
+{
+    std::wstring err;
+    if (m_proxyOnline)
+    {
+        if (ShowProxyPoolWindow(m_proxyPort, err))
+        {
+            ShowNotice(L"已打开代理池窗口", true);
+        }
+        else
+        {
+            ShowNotice(err, false);
+        }
+    }
+    else if (StartProxyPool(err))
+    {
+        m_proxyStarting = true;
+        m_proxyStartUntil = GetTickCount64() + 25000;
+        ShowNotice(L"正在启动代理池，等它开始监听 8080…", true);
+    }
+    else
+    {
+        ShowNotice(err, false);
+    }
+    InvalidateRect(m_hwnd, NULL, FALSE);
+}
+
+void MainWindow::StopProxyFromPanel()
+{
+    std::wstring err;
+    if (StopProxyPool(err))
+    {
+        m_proxyOnline = false;
+        m_proxyStarting = false;
+        ShowNotice(L"已停止代理池", true);
+    }
+    else
+    {
+        ShowNotice(err, false);
+    }
+    InvalidateRect(m_hwnd, NULL, FALSE);
+}
+
+void MainWindow::ToggleProxyAuto()
+{
+    m_proxyAuto = !m_proxyAuto;
+    SaveProxyAuto();
+    ShowNotice(m_proxyAuto ? L"启动 OpenCode 时自动开启代理池"
+                           : L"已关闭 OpenCode 自动代理",
+               true);
+    InvalidateRect(m_hwnd, NULL, FALSE);
+}
+
+// 启动 OpenCode 前把代理池拉起来。只拉起进程,端口由脚本自己等,
+// 这样不会把启动器卡住十几秒。
+void MainWindow::MaybeStartProxyFor(LauncherItem& item)
+{
+    if (!m_proxyAuto || !IsOpenCodeEntry(item))
+    {
+        return;
+    }
+    if (m_proxyOnline || m_proxyStarting)
+    {
+        return;
+    }
+
+    std::wstring err;
+    if (StartProxyPool(err))
+    {
+        m_proxyStarting = true;
+        m_proxyStartUntil = GetTickCount64() + 25000;
+    }
+    else
+    {
+        ShowNotice(err + L"，本次直连", false);
+    }
 }
 
 void MainWindow::PollRunningState()
@@ -1570,6 +1740,32 @@ RectF MainWindow::RevealButtonRect() const
     return RectF(b.X + b.Width + SF(12), b.Y, SF(172), SF(46));
 }
 
+RectF MainWindow::ProxyPanelRect() const
+{
+    float h = SF(148);
+    float cardX = m_sidebarW + SF(28);
+    float cardW = (float)(m_backW - m_sidebarW) - SF(56);
+    return RectF(cardX, (float)m_backH - h - SF(20), cardW, h);
+}
+
+RectF MainWindow::ProxyStartButtonRect() const
+{
+    RectF p = ProxyPanelRect();
+    return RectF(p.X + SF(20), p.Y + SF(96), SF(132), SF(34));
+}
+
+RectF MainWindow::ProxyStopButtonRect() const
+{
+    RectF b = ProxyStartButtonRect();
+    return RectF(b.X + b.Width + SF(8), b.Y, SF(84), SF(34));
+}
+
+RectF MainWindow::ProxyToggleRect() const
+{
+    RectF p = ProxyPanelRect();
+    return RectF(p.X + p.Width - SF(20) - SF(44), p.Y + SF(104), SF(44), SF(22));
+}
+
 int MainWindow::HitTest(int x, int y)
 {
     if (y < m_titleH)
@@ -1605,6 +1801,17 @@ int MainWindow::HitTest(int x, int y)
     }
 
     const LauncherItem* item = SelectedItem();
+    {
+        float fx = (float)x;
+        float fy = (float)y;
+        if (ProxyPanelRect().Contains(fx, fy))
+        {
+            if (ProxyStartButtonRect().Contains(fx, fy)) return 10;
+            if (ProxyStopButtonRect().Contains(fx, fy)) return 11;
+            if (ProxyToggleRect().Contains(fx, fy)) return 12;
+            return 4;
+        }
+    }
     if (item)
     {
         float fx = (float)x;
@@ -1669,6 +1876,9 @@ void MainWindow::SetCursorForRegion(int region)
     case 7:
     case 8:
     case 9:
+    case 10:
+    case 11:
+    case 12:
         SetCursor(LoadCursorW(NULL, IDC_HAND));
         break;
     default:
@@ -2029,6 +2239,108 @@ void MainWindow::PaintEmptyState(Graphics& g)
                  StringAlignmentCenter, false);
 }
 
+void MainWindow::PaintProxyPanel(Graphics& g)
+{
+    RectF p = ProxyPanelRect();
+
+    FillSq(g, p, g_theme.panelBg2);
+    FrameSq(g, p, g_theme.stroke);
+    FillSq(g, RectF(p.X, p.Y, SF(3), p.Height), g_theme.accent);
+
+    // 标题
+    Font tf(g_uiFont.c_str(), SF(12), FontStyleBold, UnitPixel);
+    RectF tr(p.X + SF(20), p.Y + SF(11), SF(180), SF(22));
+    DrawTextLine(g, L"本地代理", tf, tr, g_theme.textPrimary,
+                 StringAlignmentNear, false);
+
+    // 右上角状态
+    std::wstring status;
+    Color dotColor;
+    if (m_proxyOnline)
+    {
+        status = L"在线";
+        dotColor = g_theme.success;
+    }
+    else if (m_proxyStarting)
+    {
+        status = L"启动中";
+        dotColor = g_theme.accent;
+    }
+    else
+    {
+        status = L"未启动";
+        dotColor = g_theme.textMuted;
+    }
+
+    Font sf(g_uiFont.c_str(), SF(10), FontStyleRegular, UnitPixel);
+    float sw = MeasureText(g, status, sf);
+    float sx = p.X + p.Width - SF(20) - sw;
+    SolidBrush dot(dotColor);
+    g.FillEllipse(&dot, sx - SF(13), p.Y + SF(21), SF(7), SF(7));
+    RectF sr(sx, p.Y + SF(15), sw + SF(2), SF(18));
+    DrawTextLine(g, status, sf, sr, g_theme.textSecondary,
+                 StringAlignmentNear, false);
+
+    // 说明 / 地址
+    Font df(g_uiFont.c_str(), SF(10), FontStyleRegular, UnitPixel);
+    RectF dr(p.X + SF(20), p.Y + SF(38), p.Width - SF(140), SF(18));
+    DrawTextLine(g, L"ProxyPool 免费代理池 · 启动 OpenCode 时自动接入",
+                 df, dr, g_theme.textMuted, StringAlignmentNear, true);
+
+    wchar_t addr[64];
+    swprintf_s(addr, 64, L"地址 127.0.0.1:%d", m_proxyPort);
+    RectF ar(p.X + SF(20), p.Y + SF(60), p.Width - SF(40), SF(18));
+    DrawTextLine(g, addr, df, ar, g_theme.textSecondary,
+                 StringAlignmentNear, false);
+
+    // 启动 / 打开窗口
+    RectF sb = ProxyStartButtonRect();
+    bool hoverStart = (m_hoverRegion == 10);
+    bool primary = !m_proxyOnline;
+    Color startFill = primary ? (hoverStart ? g_theme.accentHover : g_theme.accent)
+                              : (hoverStart ? g_theme.hoverBg : g_theme.panelBg);
+    FillSq(g, sb, startFill);
+    FrameSq(g, sb, primary ? g_theme.accent : g_theme.strokeStrong);
+
+    const wchar_t* startLabel = m_proxyOnline ? L"打开代理池窗口"
+                              : (m_proxyStarting ? L"正在启动…" : L"启动代理池");
+    Font bf(g_uiFont.c_str(), SF(11), FontStyleBold, UnitPixel);
+    DrawTextLine(g, startLabel, bf, sb,
+                 primary ? g_theme.onAccent : g_theme.textPrimary,
+                 StringAlignmentCenter, false);
+
+    // 停止
+    RectF tb = ProxyStopButtonRect();
+    bool hoverStop = (m_hoverRegion == 11);
+    bool stopEnabled = m_proxyOnline || m_proxyStarting;
+    FillSq(g, tb, (hoverStop && stopEnabled) ? g_theme.hoverBg : Color(0, 0, 0, 0));
+    FrameSq(g, tb, stopEnabled ? g_theme.strokeStrong : g_theme.stroke);
+
+    Font stf(g_uiFont.c_str(), SF(11), FontStyleRegular, UnitPixel);
+    Color stopText = stopEnabled
+                         ? (hoverStop ? g_theme.danger : g_theme.textSecondary)
+                         : g_theme.textMuted;
+    DrawTextLine(g, L"停止", stf, tb, stopText, StringAlignmentCenter, false);
+
+    // 自动代理开关
+    RectF tg = ProxyToggleRect();
+    bool hoverToggle = (m_hoverRegion == 12);
+    FillSq(g, tg, m_proxyAuto ? g_theme.accent : g_theme.panelBg);
+    FrameSq(g, tg, hoverToggle ? g_theme.accentHover
+                               : (m_proxyAuto ? g_theme.accent : g_theme.strokeStrong));
+
+    float knob = tg.Height - SF(6);
+    float knobX = m_proxyAuto ? tg.X + tg.Width - SF(3) - knob : tg.X + SF(3);
+    FillSq(g, RectF(knobX, tg.Y + SF(3), knob, knob),
+           m_proxyAuto ? g_theme.onAccent : g_theme.textMuted);
+
+    Font lf(g_uiFont.c_str(), SF(10), FontStyleRegular, UnitPixel);
+    RectF lr(tg.X - SF(10) - SF(90), tg.Y - SF(4), SF(90), SF(30));
+    DrawTextLine(g, L"自动代理", lf, lr,
+                 m_proxyAuto ? g_theme.textSecondary : g_theme.textMuted,
+                 StringAlignmentFar, false);
+}
+
 void MainWindow::PaintContent(Graphics& g)
 {
     int x0 = m_sidebarW;
@@ -2050,6 +2362,7 @@ void MainWindow::PaintContent(Graphics& g)
     if (!item)
     {
         PaintEmptyState(g);
+        PaintProxyPanel(g);
         return;
     }
 
@@ -2230,9 +2543,9 @@ void MainWindow::PaintContent(Graphics& g)
                      kf, kr, g_theme.textMuted, StringAlignmentNear, false);
     }
 
-    // 使用提示
+    // 使用提示(空间不够时让位给代理面板)
     float hintY = cardY + cardH + SF(18);
-    if (hintY + SF(120) < m_backH)
+    if (hintY + SF(118) < ProxyPanelRect().Y - SF(14))
     {
         float hintW = cardW;
         FillSq(g, RectF(cardX, hintY, hintW, SF(118)), g_theme.hintBg);
@@ -2258,6 +2571,8 @@ void MainWindow::PaintContent(Graphics& g)
                          StringAlignmentNear, true);
         }
     }
+
+    PaintProxyPanel(g);
 }
 
 void MainWindow::PaintNotice(Graphics& g)

@@ -12,6 +12,7 @@
 - 运行中检测：已在运行的工具显示绿色圆点，再次启动直接切到已有窗口
 - 右键菜单：管理员运行、打开目录、复制路径、隐藏条目
 - 使用统计与「最近使用」置顶分组
+- 内嵌本地代理面板：查看 / 启动 / 停止 ProxyPool，启动 OpenCode 时自动接入代理
 
 ## 目录结构
 
@@ -22,7 +23,7 @@ toolbox/
 ├─ dist/                成品目录（可直接拷走使用）
 │  ├─ Toolkit.exe
 │  ├─ tools.ini         工具清单
-│  ├─ settings.ini      界面设置（主题 / 隐藏条目，程序自动生成）
+│  ├─ settings.ini      界面设置（主题 / 隐藏条目 / 自动代理，程序自动生成）
 │  ├─ stats.ini         使用统计（启动次数 / 最后启动时间，程序自动生成）
 │  └─ tools/
 │     ├─ Everything/    Everything 文件搜索
@@ -120,6 +121,30 @@ args=
 `.exe` 按完整路径匹配；`.bat` / `.cmd` 按「进程位于该脚本所在目录下」匹配，
 因此 OpenCode 这类通过批处理启动的工具也能识别到它目录里的 `opencode.exe`。
 
+## 本地代理面板
+
+窗口右下角固定有一张「本地代理」卡片，把工具箱里的 ProxyPool 收进来：
+
+| 元素 | 说明 |
+| --- | --- |
+| 状态 | 「在线」= `127.0.0.1:8080` 正在监听；「启动中」= 已拉起进程、正在等端口；「未启动」 |
+| 启动代理池 / 打开代理池窗口 | 未启动时拉起 `tools\ProxyPool\proxypool-gui.exe`；已在线时把它的窗口切到前台 |
+| 停止 | 结束 `proxypool-gui.exe` / `proxypool.exe`，并等 8080 释放 |
+| 自动代理开关 | 开启时，启动 OpenCode 前若 8080 没在监听就先拉起代理池 |
+
+开关状态保存在 `dist\settings.ini`：
+
+```ini
+[proxy]
+auto=1
+port=8080
+```
+
+- `auto=0` 时启动器不再自动拉起代理池；但 8080 已经在监听时，`start-opencode.bat` 仍会给 OpenCode 设置代理环境变量
+- `port` 可选，缺省 8080，只影响面板的探测与启停判断
+- 面板只负责「拉起进程」，不阻塞等待端口；OpenCode 的批处理自己轮询 8080，最多等约 12 秒
+- 代理池没在运行时启动 OpenCode，会把它自己的窗口显示出来，方便看抓取 / 校验日志
+
 ## 使用统计与最近使用
 
 每次成功启动会写入 `dist\stats.ini`：
@@ -173,6 +198,7 @@ build.bat
 - **Visual Studio Code** — 代码编辑器（`dist\tools\VSCode\`）
 - **Dev-C++ 编译器** — 经典 C/C++ IDE，内置 MinGW64（`dist\tools\DevCpp\`）
 - **OpenCode 便携版** — AI 编程终端 v2.2.7，配置 / skills / 会话数据全在包内（`dist\tools\OpenCode\`）
+- **ProxyPool 免费代理池** — 本地 8080 代理池，启动器面板可启停，OpenCode 自动接入（`dist\tools\ProxyPool\`）
 
 > OpenCode 便携版的后台服务固定用 `127.0.0.1:4010`，避开系统里 npm 版占用的 28894。
 > 端口保存在 `dist\tools\OpenCode\.config\opencode\service.json`；该文件丢失时，`start-opencode.bat` 会在启动前自动重建为 4010。

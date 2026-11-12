@@ -537,6 +537,54 @@ void UpdateRunningItems(std::vector<LauncherItem>& items)
     }
 }
 
+DWORD FindProcessByExePath(const std::wstring& exePath)
+{
+    if (exePath.empty())
+    {
+        return 0;
+    }
+    std::vector<ProcEntry> procs;
+    SnapshotProcesses(procs);
+    for (size_t i = 0; i < procs.size(); ++i)
+    {
+        if (_wcsicmp(procs[i].path.c_str(), exePath.c_str()) == 0)
+        {
+            return procs[i].pid;
+        }
+    }
+    return 0;
+}
+
+int KillProcessesByExePath(const std::wstring& exePath)
+{
+    if (exePath.empty())
+    {
+        return 0;
+    }
+    std::vector<ProcEntry> procs;
+    SnapshotProcesses(procs);
+
+    int killed = 0;
+    for (size_t i = 0; i < procs.size(); ++i)
+    {
+        if (_wcsicmp(procs[i].path.c_str(), exePath.c_str()) != 0)
+        {
+            continue;
+        }
+        HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, procs[i].pid);
+        if (!h)
+        {
+            continue;
+        }
+        if (TerminateProcess(h, 0))
+        {
+            ++killed;
+        }
+        CloseHandle(h);
+    }
+    return killed;
+}
+
 bool FocusRunningInstance(DWORD pid, std::wstring& err)
 {
     err.clear();

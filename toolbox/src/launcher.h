@@ -39,6 +39,12 @@ bool LaunchLauncherElevated(const LauncherItem& item, std::wstring& err);
 // .bat / .cmd 条目按所在目录前缀匹配(脚本宿主 cmd.exe 本身不在该目录)。
 void UpdateRunningItems(std::vector<LauncherItem>& items);
 
+// 按 exe 绝对路径查找进程,返回 PID;0 表示没找到。
+DWORD FindProcessByExePath(const std::wstring& exePath);
+
+// 结束该路径下的所有进程,返回结束的数量。
+int KillProcessesByExePath(const std::wstring& exePath);
+
 // 把指定进程的主窗口切到前台。控制台程序可能由 conhost 持有窗口。
 bool FocusRunningInstance(DWORD pid, std::wstring& err);
 

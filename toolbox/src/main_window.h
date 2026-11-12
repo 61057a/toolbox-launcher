@@ -26,6 +26,7 @@ private:
     void PaintTitleBar(Gdiplus::Graphics& g);
     void PaintSearchBox(Gdiplus::Graphics& g);
     void PaintContent(Gdiplus::Graphics& g);
+    void PaintProxyPanel(Gdiplus::Graphics& g);
     void PaintNotice(Gdiplus::Graphics& g);
     void PaintEmptyState(Gdiplus::Graphics& g);
 
@@ -33,6 +34,10 @@ private:
     int ListItemAt(int y) const;
     Gdiplus::RectF LaunchButtonRect() const;
     Gdiplus::RectF RevealButtonRect() const;
+    Gdiplus::RectF ProxyPanelRect() const;
+    Gdiplus::RectF ProxyStartButtonRect() const;
+    Gdiplus::RectF ProxyStopButtonRect() const;
+    Gdiplus::RectF ProxyToggleRect() const;
     void ScrollListBy(int dy);
 
     void ReloadItems();
@@ -53,6 +58,14 @@ private:
     void AppendMenuSeparator(HMENU menu);
     void DrawMenuEntry(DRAWITEMSTRUCT* dis);
     void PollRunningState();
+    void PollProxyState();
+    void StartProxyFromPanel();
+    void StopProxyFromPanel();
+    void ToggleProxyAuto();
+    void LoadProxySettings();
+    void SaveProxyAuto();
+    void MaybeStartProxyFor(LauncherItem& item);
+
     void LoadHiddenIds();
     void SaveHiddenIds();
     void SetItemHidden(int index, bool hidden);
@@ -119,4 +132,11 @@ private:
     // 计时器(用于通知淡出 / 搜索光标闪烁 / 运行状态轮询)
     UINT m_tickTimerId;
     UINT m_statusTimerId;
+
+    // 本地代理池面板
+    bool m_proxyOnline;      // 127.0.0.1:8080 正在监听
+    bool m_proxyStarting;    // 面板点了启动,还在等端口
+    ULONGLONG m_proxyStartUntil;
+    bool m_proxyAuto;        // 启动 OpenCode 时自动拉起代理池
+    int m_proxyPort;
 };
