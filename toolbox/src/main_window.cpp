@@ -177,6 +177,14 @@ static bool SetClipboardText(const std::wstring& text)
 // ---------------------------------------------------------------------------
 // 全局通知
 // ---------------------------------------------------------------------------
+static bool IsOpenCodeEntry(const LauncherItem& item);
+
+static std::wstring DirNameOf(const std::wstring& file)
+{
+    size_t p = file.find_last_of(L"\\/");
+    return (p == std::wstring::npos) ? std::wstring() : file.substr(0, p);
+}
+
 static std::wstring g_lastNotice;
 static ULONGLONG g_lastNoticeUntil = 0;
 static bool g_noticeSuccess = false;
@@ -202,7 +210,8 @@ MainWindow::MainWindow()
       m_searchActive(false),
       m_tickTimerId(0), m_statusTimerId(0),
       m_proxyOnline(false), m_proxyStarting(false), m_proxyStartUntil(0),
-      m_proxyAuto(true), m_proxyPort(8080)
+      m_proxyAuto(true), m_proxyPort(8080),
+      m_pinPending(false), m_pinUntil(0), m_quotaNextPoll(0), m_quotaRotations(0)
 {
 }
 
@@ -461,6 +470,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wParam, LPARAM lParam)
         {
             PollRunningState();
             PollProxyState();
+            PollProxyQuota();
         }
         return 0;
 
@@ -1114,6 +1124,7 @@ void MainWindow::LaunchItem(int index, bool elevated, bool forceNew)
     }
 
     LauncherItem& item = m_items[index];
+    bool openCode = IsOpenCodeEntry(item);
 
     // 已经在运行:切到已有窗口,避免重复启动(OpenCode 会抢 4010 端口)。
     if (!forceNew && !elevated && item.running)
@@ -1126,6 +1137,10 @@ void MainWindow::LaunchItem(int index, bool elevated, bool forceNew)
         else
         {
             ShowNotice(L"已在运行：" + item.name + L"（" + err + L"）", true);
+        }
+        if (openCode)
+        {
+            AttachProxyForOpenCode(item);
         }
         InvalidateRect(m_hwnd, NULL, FALSE);
         return;
@@ -1155,6 +1170,12 @@ void MainWindow::LaunchItem(int index, bool elevated, bool forceNew)
         {
             ShowNotice(elevated ? L"已以管理员身份启动：" + item.name
                                 : L"已启动：" + item.name, true);
+        }
+
+        // 固定出口要等代理池端口就绪,这里先把「待固定 / 额度监测」挂上
+        if (openCode)
+        {
+            AttachProxyForOpenCode(item);
         }
     }
     else
@@ -1217,9 +1238,62 @@ void MainWindow::PollProxyState()
 
     if (online != m_proxyOnline || starting != m_proxyStarting)
     {
+        // 代理池被重新拉起:恢复固定与额度监测(OpenCode 还在跑的话)
+        if (online && !m_proxyOnline && !m_openCodeDb.empty() &&
+            !m_quota.Active() && AnyOpenCodeRunning())
+        {
+            m_quota.Watch(m_openCodeDb);
+            m_pinPending = true;
+            m_pinUntil = GetTickCount64() + 20000;
+            m_quotaNextPoll = GetTickCount64() + 2500;
+        }
         m_proxyOnline = online;
         m_proxyStarting = starting;
         InvalidateRect(m_hwnd, NULL, FALSE);
+    }
+
+    if (!m_proxyOnline)
+    {
+        return;
+    }
+
+    // 刚启动 OpenCode:代理池可能还在起,控制接口可用后再固定
+    if (m_pinPending)
+    {
+        if (!TryPinProxy() && GetTickCount64() > m_pinUntil)
+        {
+            m_pinPending = false;
+            ShowNotice(L"没能固定出口：代理池控制接口无响应（重启代理池可恢复）", false);
+        }
+        return;
+    }
+
+    // 代理池每次刷新都会重建节点列表,固定可能被清掉;这里顺手补上。
+    // 同时把用户在代理池窗口里手动点选的节点同步到面板。
+    if (!m_proxyPinned.empty() && m_quota.Active())
+    {
+        ProxyPoolStatus st;
+        if (!QueryProxyPool(ProxyCtlPort(), st))
+        {
+            return;
+        }
+        if (!st.fixed)
+        {
+            std::wstring pinned;
+            std::wstring err;
+            if (FixProxyPool(ProxyCtlPort(), pinned, err) &&
+                !pinned.empty() && pinned != m_proxyPinned)
+            {
+                m_proxyPinned = pinned;
+                ShowNotice(L"代理出口已重新固定：" + pinned, true);
+                InvalidateRect(m_hwnd, NULL, FALSE);
+            }
+        }
+        else if (!st.pinned.empty() && st.pinned != m_proxyPinned)
+        {
+            m_proxyPinned = st.pinned;
+            InvalidateRect(m_hwnd, NULL, FALSE);
+        }
     }
 }
 
@@ -1257,6 +1331,9 @@ void MainWindow::StopProxyFromPanel()
     {
         m_proxyOnline = false;
         m_proxyStarting = false;
+        m_quota.Stop();
+        m_pinPending = false;
+        m_proxyPinned.clear();
         ShowNotice(L"已停止代理池", true);
     }
     else
@@ -1299,6 +1376,128 @@ void MainWindow::MaybeStartProxyFor(LauncherItem& item)
     {
         ShowNotice(err + L"，本次直连", false);
     }
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode 固定出口 + 免费额度自动换出口
+// ---------------------------------------------------------------------------
+
+// 说明:
+//   - OpenCode 启动后把出口固定到一个健康节点,整个会话出口 IP 不变,
+//     这样额度是「一个 IP 的额度」,不会因为按请求轮换而漂移;
+//   - 免费额度用尽时,OpenCode 会把错误写进自己的数据库(session_message),
+//     这里读出来,让代理池把旧节点按 retryAfterMs 冷却,再换下一个出口;
+//   - 换完出口后需要用户在 OpenCode 里再发一条消息(当前不自动重发)。
+void MainWindow::AttachProxyForOpenCode(const LauncherItem& item)
+{
+    if (!m_proxyAuto && !m_proxyOnline)
+    {
+        return; // 自动代理关着、代理池也没在跑,bat 会直连,无需固定
+    }
+
+    // bat 把 HOME / XDG_DATA_HOME 指到自身目录,
+    // 所以便携版的数据库在 <bat 目录>\.local\share\opencode\opencode.db
+    m_openCodeDb = DirNameOf(item.resolved) +
+                   L"\\.local\\share\\opencode\\opencode.db";
+    m_quota.Watch(m_openCodeDb);
+    m_quotaRotations = 0;
+
+    m_pinPending = true;
+    m_pinUntil = GetTickCount64() + 20000;
+    m_quotaNextPoll = GetTickCount64() + 2500;
+
+    TryPinProxy();
+}
+
+bool MainWindow::TryPinProxy()
+{
+    if (!m_pinPending)
+    {
+        return true;
+    }
+
+    std::wstring pinned;
+    std::wstring err;
+    if (!FixProxyPool(ProxyCtlPort(), pinned, err))
+    {
+        return false;
+    }
+
+    m_pinPending = false;
+    m_proxyPinned = pinned;
+    ShowNotice(L"已固定代理出口 " + pinned + L"，额度用尽时自动换", true);
+    InvalidateRect(m_hwnd, NULL, FALSE);
+    return true;
+}
+
+int MainWindow::ProxyCtlPort() const
+{
+    return ProxyControlPort(m_proxyPort);
+}
+
+bool MainWindow::AnyOpenCodeRunning() const
+{
+    for (size_t i = 0; i < m_items.size(); ++i)
+    {
+        if (IsOpenCodeEntry(m_items[i]) && m_items[i].running)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void MainWindow::PollProxyQuota()
+{
+    if (!m_quota.Active())
+    {
+        return;
+    }
+
+    ULONGLONG now = GetTickCount64();
+    if (now < m_quotaNextPoll)
+    {
+        return;
+    }
+    m_quotaNextPoll = now + 2000;
+
+    if (!AnyOpenCodeRunning())
+    {
+        // OpenCode 都退出了,不再关心它数据库里的历史记录
+        m_quota.Stop();
+        m_pinPending = false;
+        return;
+    }
+
+    long long retryAfterMs = 0;
+    if (!m_quota.Poll(retryAfterMs))
+    {
+        return;
+    }
+
+    // retryAfterMs 是官方给的额度恢复时间(约 12 小时),
+    // 直接当旧节点的冷却时长,恢复前不再选它
+    int ttlSec = (int)(retryAfterMs / 1000);
+    if (ttlSec < 60)
+    {
+        ttlSec = 3600;
+    }
+
+    std::wstring pinned;
+    std::wstring err;
+    if (RotateProxyPool(ProxyCtlPort(), m_proxyPinned, ttlSec, pinned, err))
+    {
+        m_proxyPinned = pinned;
+        ++m_quotaRotations;
+        ShowNotice(L"OpenCode 免费额度用尽，已换出口 " + pinned +
+                       L"，再发一条消息即可继续",
+                   true);
+    }
+    else
+    {
+        ShowNotice(L"OpenCode 免费额度用尽，但没有可用的备用出口：" + err, false);
+    }
+    InvalidateRect(m_hwnd, NULL, FALSE);
 }
 
 void MainWindow::PollRunningState()
@@ -2292,6 +2491,34 @@ void MainWindow::PaintProxyPanel(Graphics& g)
     RectF ar(p.X + SF(20), p.Y + SF(60), p.Width - SF(40), SF(18));
     DrawTextLine(g, addr, df, ar, g_theme.textSecondary,
                  StringAlignmentNear, false);
+
+    // 右侧:当前出口模式
+    std::wstring route;
+    Color routeColor = g_theme.textMuted;
+    if (m_proxyOnline && !m_proxyPinned.empty())
+    {
+        route = L"固定出口 " + m_proxyPinned + L" · 额度用尽自动换";
+        if (m_quotaRotations > 0)
+        {
+            route += L"（已换 " + std::to_wstring(m_quotaRotations) + L" 次）";
+        }
+        routeColor = g_theme.textSecondary;
+    }
+    else if (m_proxyOnline && m_pinPending)
+    {
+        route = L"正在固定出口…";
+    }
+    else if (m_proxyOnline)
+    {
+        route = L"自动轮换 · 启动 OpenCode 时固定出口";
+    }
+    else
+    {
+        route = L"启动后固定出口，额度用尽自动换";
+    }
+
+    RectF rr(p.X + SF(180), p.Y + SF(60), p.Width - SF(200), SF(18));
+    DrawTextLine(g, route, df, rr, routeColor, StringAlignmentFar, true);
 
     // 启动 / 打开窗口
     RectF sb = ProxyStartButtonRect();

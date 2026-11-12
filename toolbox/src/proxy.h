@@ -21,3 +21,33 @@ bool ShowProxyPoolWindow(int port, std::wstring& err);
 
 // 结束 proxy-pool 的 GUI 与命令行进程,并等端口释放。
 bool StopProxyPool(std::wstring& err);
+
+// ---------------------------------------------------------------------------
+// ProxyPool 本机控制接口(默认 127.0.0.1:代理端口+1,只绑本机)
+// 用于「启动 OpenCode 时固定出口,额度用尽后再换一个出口」。
+// ---------------------------------------------------------------------------
+
+// 代理端口对应的控制端口;port 不合理时返回 0。
+int ProxyControlPort(int proxyPort);
+
+struct ProxyPoolStatus
+{
+    bool reachable;          // 控制接口能访问
+    bool fixed;              // 当前是否固定节点
+    int size;                // 池里可用节点数
+    std::wstring pinned;     // 固定节点的 key,例如 1.2.3.4:8080
+
+    ProxyPoolStatus() : reachable(false), fixed(false), size(0) {}
+};
+
+bool QueryProxyPool(int ctlPort, ProxyPoolStatus& status);
+
+// 固定到一个健康节点;已经固定在健康节点上时不会换,避免出口 IP 乱跳。
+bool FixProxyPool(int ctlPort, std::wstring& pinned, std::wstring& err);
+
+// 换到下一个健康节点,并把 dead(旧节点)在 ttlSec 秒内标记为额度用尽。
+bool RotateProxyPool(int ctlPort, const std::wstring& dead, int ttlSec,
+                     std::wstring& pinned, std::wstring& err);
+
+// 恢复自动轮换。
+bool AutoProxyPool(int ctlPort, std::wstring& err);

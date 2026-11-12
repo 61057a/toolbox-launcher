@@ -169,7 +169,6 @@ std::string WideToUtf8Str(const std::wstring& wide)
     out.resize(needed);
     WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), (int)wide.size(),
                         &out[0], needed, NULL, NULL);
-    out.resize(needed - 1); // 去掉结尾 null
     return out;
 }
 

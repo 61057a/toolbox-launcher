@@ -2,6 +2,7 @@
 #include "common.h"
 #include "launcher.h"
 #include "stats.h"
+#include "quota.h"
 
 // 主窗口:左侧搜索 + 分组工具列表,右侧工具详情 / 启动区。
 // 整个窗口只有一个 HWND,全部 GDI+ 自绘。
@@ -65,6 +66,13 @@ private:
     void LoadProxySettings();
     void SaveProxyAuto();
     void MaybeStartProxyFor(LauncherItem& item);
+
+    // 固定出口 + 免费额度监测(OpenCode 专用)
+    void AttachProxyForOpenCode(const LauncherItem& item);
+    bool TryPinProxy();
+    void PollProxyQuota();
+    bool AnyOpenCodeRunning() const;
+    int ProxyCtlPort() const;
 
     void LoadHiddenIds();
     void SaveHiddenIds();
@@ -139,4 +147,13 @@ private:
     ULONGLONG m_proxyStartUntil;
     bool m_proxyAuto;        // 启动 OpenCode 时自动拉起代理池
     int m_proxyPort;
+
+    // OpenCode 固定出口 + 免费额度监测
+    bool m_pinPending;           // 已发起固定请求,等控制接口就绪
+    ULONGLONG m_pinUntil;
+    std::wstring m_proxyPinned;  // 当前固定节点(空 = 自动轮换)
+    QuotaWatcher m_quota;
+    ULONGLONG m_quotaNextPoll;
+    int m_quotaRotations;        // 本次会话因额度用尽换了几次出口
+    std::wstring m_openCodeDb;   // 本次 OpenCode 会话的数据库路径
 };
